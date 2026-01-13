@@ -1,12 +1,12 @@
-# Diff des modifications pour le support EFI
+# Diff of Changes for EFI Support
 
-## Fichier modifié
+## Modified File
 
 ### `scripts/package-harvester-os`
 
-Ce fichier a été modifié pour ajouter le support du boot EFI/UEFI au lieu du boot BIOS legacy lors de la création d'images raw avec `BUILD_QCOW=true`.
+This file has been modified to add EFI/UEFI boot support instead of legacy BIOS boot when creating raw images with `BUILD_QCOW=true`.
 
-## Diff complet
+## Complete Diff
 
 ```diff
 diff --git a/scripts/package-harvester-os b/scripts/package-harvester-os
@@ -86,62 +86,62 @@ index fdd4528f..79b692eb 100755
    zstd -T4 --rm ${ARTIFACTS_DIR}/${PROJECT_PREFIX}-amd64.raw
 ```
 
-## Résumé des changements
+## Summary of Changes
 
-### Avant (BIOS Legacy)
-- Utilisait le type de machine par défaut (BIOS legacy)
-- Pas de firmware UEFI spécifié
-- Commande QEMU construite en une seule ligne longue
+### Before (Legacy BIOS)
+- Used default machine type (legacy BIOS)
+- No UEFI firmware specified
+- QEMU command built in a single long line
 
-### Après (EFI/UEFI)
-1. **Détection automatique du firmware OVMF:**
-   - Cherche dans `/usr/share/OVMF/` (Debian/Ubuntu)
-   - Cherche dans `/usr/share/qemu/` (openSUSE/Fedora)
-   - Supporte les fichiers séparés (CODE/VARS) et combinés
+### After (EFI/UEFI)
+1. **Automatic OVMF firmware detection:**
+   - Searches in `/usr/share/OVMF/` (Debian/Ubuntu)
+   - Searches in `/usr/share/qemu/` (openSUSE/Fedora)
+   - Supports both separate (CODE/VARS) and combined files
 
-2. **Type de machine changé:**
-   - De: défaut (BIOS legacy)
-   - Vers: `-machine q35,accel=kvm` (support UEFI)
+2. **Machine type changed:**
+   - From: default (legacy BIOS)
+   - To: `-machine q35,accel=kvm` (UEFI support)
 
-3. **Configuration du firmware UEFI:**
-   - Utilise `-drive if=pflash` pour les fichiers CODE/VARS séparés (méthode recommandée)
-   - Utilise `-bios` comme fallback pour les fichiers combinés
-   - Avertit si OVMF n'est pas trouvé et utilise BIOS legacy
+3. **UEFI firmware configuration:**
+   - Uses `-drive if=pflash` for separate CODE/VARS files (recommended method)
+   - Uses `-bios` as fallback for combined files
+   - Warns if OVMF is not found and uses legacy BIOS
 
-4. **Amélioration de la structure du code:**
-   - Utilise un tableau bash (`QEMU_ARGS`) au lieu de concaténation de chaînes
-   - Plus lisible et maintenable
-   - Meilleure gestion des erreurs
+4. **Code structure improvement:**
+   - Uses bash array (`QEMU_ARGS`) instead of string concatenation
+   - More readable and maintainable
+   - Better error handling
 
-## Fichiers ajoutés (non trackés)
+## Added Files (Untracked)
 
-Ces fichiers ont été créés pour la documentation et les outils:
+These files were created for documentation and tools:
 
-- `build-efi-raw.sh` - Script automatisé pour créer des images raw EFI
-- `MANUAL_EFI_BUILD.md` - Guide manuel étape par étape
-- `BUILD_STATUS.md` - Guide de monitoring du build
-- `TESTING_SUMMARY.md` - Résumé des tests
-- `FIX_DOCKER_SOCKET.md` - Documentation du correctif pour le socket Docker
-- `DIFF_EFI_CHANGES.md` - Ce fichier
+- `build-efi-raw.sh` - Automated script to create EFI raw images
+- `MANUAL_EFI_BUILD.md` - Complete step-by-step manual guide
+- `BUILD_STATUS.md` - Build monitoring guide
+- `TESTING_SUMMARY.md` - Testing summary
+- `FIX_DOCKER_SOCKET.md` - Documentation of Docker socket fix
+- `DIFF_EFI_CHANGES.md` - This file
 
-## Application du patch
+## Applying the Patch
 
-Pour appliquer ce patch sur une autre copie du dépôt:
+To apply this patch to another copy of the repository:
 
 ```bash
 cd /path/to/harvester-installer
 git apply /tmp/diff-package-harvester-os.patch
 ```
 
-Ou pour voir le diff complet:
+Or to see the complete diff:
 
 ```bash
 cd /root/harvester-installer
 git diff scripts/package-harvester-os
 ```
 
-## Version de référence
+## Reference Version
 
-- **Commit de base:** `085eda28` (Bump copyright year #1215)
-- **Branche:** `master`
+- **Base commit:** `085eda28` (Bump copyright year #1215)
+- **Branch:** `master`
 - **Remote:** `https://github.com/harvester/harvester-installer.git`
