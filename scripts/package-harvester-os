@@ -120,12 +120,14 @@ then
 fi
 
 
+# Use gzip compression instead of xz to reduce memory usage
+# xz requires ~5GB RAM, gzip requires ~2GB RAM
 elemental build-iso --config-dir "${CONFIG_DIR}" --debug "docker:${HARVESTER_OS_IMAGE}" \
           --local \
           -n "${ISO_PREFIX}" \
           -o "${ARTIFACTS_DIR}" \
           --overlay-iso "$(pwd)/iso" \
-          -x "-comp xz" \
+          -x "-comp gzip" \
           --platform "linux/${PLATFORM}"
 
 rm -f ${ARTIFACTS_DIR}/${ISO_PREFIX}.iso.sha256
@@ -184,19 +186,206 @@ fi
 # Cleanup
 rm -rf "${extract_dir}"
 
+# ============================================================================
+# Section: Création d'image raw avec boot EFI/UEFI
+# ============================================================================
+# Cette section génère une image disque raw (format QCOW) avec support du
+# boot EFI/UEFI au lieu du boot BIOS legacy. L'image est créée en démarrant
+# une VM QEMU avec le firmware OVMF (Open Virtual Machine Firmware) qui
+# permet le boot UEFI.
+# ============================================================================
 if [ "${BUILD_QCOW}" == "true" ]; then
   echo "generating harvester install mode qcow"
+  
+  # Création de l'image disque raw de 250GB
+  # Format: raw (non alloué, sparse file - n'utilise que l'espace réellement écrit)
+  # Taille: 250GB (suffisant pour l'installation complète de Harvester)
   qemu-img create -f raw -o size=250G ${ARTIFACTS_DIR}/${PROJECT_PREFIX}-amd64.raw
-  qemu-system-x86_64 --enable-kvm -nographic -cpu host -smp cores=2,threads=2,sockets=1 -m 8192 -serial mon:stdio \
-  -serial file:harvester-installer.log  -nic none \
-  -drive file=${ARTIFACTS_DIR}/${PROJECT_PREFIX}-amd64.raw,if=virtio,cache=writeback,discard=ignore,format=raw \
-  -boot d -cdrom ${ARTIFACTS_DIR}/${PROJECT_PREFIX}-amd64.iso -kernel ${ARTIFACTS_DIR}/${PROJECT_PREFIX}-vmlinuz-amd64 \
-  -append "cdroot root=live:CDLABEL=COS_LIVE rd.live.dir=/ rd.live.ram=1 rd.live.squashimg=rootfs.squashfs \
-  console=ttyS1 rd.cos.disable net.ifnames=1 harvester.install.mode=install harvester.install.device=/dev/vda \
-  harvester.install.automatic=true harvester.install.powerOff=true harvester.os.password=rancher \
-  harvester.scheme_version=1 harvester.install.persistentPartitionSize=150Gi harvester.install.skipchecks=true" \
-  -initrd ${ARTIFACTS_DIR}/${PROJECT_PREFIX}-initrd-amd64 -boot once=d
+  
+  # ========================================================================
+  # Détection automatique du firmware OVMF pour le boot UEFI
+  # ========================================================================
+  # OVMF (Open Virtual Machine Firmware) est une implémentation open-source
+  # du firmware UEFI pour les machines virtuelles. Il existe sous deux formes:
+  # 1. Fichiers séparés: OVMF_CODE.fd (firmware en lecture seule) et
+  #    OVMF_VARS.fd (variables NVRAM modifiables) - méthode recommandée
+  # 2. Fichier combiné: OVMF.fd (tout-en-un) - méthode de fallback
+  #
+  # Les chemins varient selon les distributions Linux:
+  # - Debian/Ubuntu: /usr/share/OVMF/
+  # - openSUSE/Fedora: /usr/share/qemu/
+  # ========================================================================
+  OVMF_CODE=""
+  OVMF_VARS=""
+  
+  # Recherche prioritaire: fichiers séparés dans /usr/share/OVMF/ (Debian/Ubuntu)
+  # Cette méthode est préférée car elle permet de modifier les variables NVRAM
+  # sans toucher au firmware principal (read-only)
+  if [ -f /usr/share/OVMF/OVMF_CODE.fd ] && [ -f /usr/share/OVMF/OVMF_VARS.fd ]; then
+    OVMF_CODE="/usr/share/OVMF/OVMF_CODE.fd"
+    OVMF_VARS="/usr/share/OVMF/OVMF_VARS.fd"
+  
+  # Recherche alternative: fichiers séparés dans /usr/share/qemu/ (openSUSE/Fedora)
+  # Même principe que ci-dessus mais avec des noms de fichiers différents (.bin)
+  elif [ -f /usr/share/qemu/ovmf-x86_64-code.bin ] && [ -f /usr/share/qemu/ovmf-x86_64-vars.bin ]; then
+    OVMF_CODE="/usr/share/qemu/ovmf-x86_64-code.bin"
+    OVMF_VARS="/usr/share/qemu/ovmf-x86_64-vars.bin"
+  
+  # Fallback: fichier combiné OVMF.fd
+  # Si les fichiers séparés ne sont pas trouvés, on utilise un fichier combiné
+  # Note: cette méthode est moins flexible mais fonctionne aussi
+  elif [ -f /usr/share/OVMF/OVMF.fd ]; then
+    OVMF_CODE="/usr/share/OVMF/OVMF.fd"
+  fi
+  
+  # ========================================================================
+  # Construction de la commande QEMU avec support UEFI
+  # ========================================================================
+  # Utilisation du type de machine q35 (au lieu du défaut i440fx) car:
+  # - q35 est une architecture moderne avec meilleur support UEFI
+  # - Support natif des fonctionnalités UEFI (ACPI 2.0, PCIe, etc.)
+  # - Compatible avec les systèmes d'exploitation modernes
+  # ========================================================================
+  QEMU_ARGS=(
+    # Type de machine: q35 (chipset moderne) avec accélération KVM
+    # q35: Chipset Intel Q35 Express (plus moderne que i440fx)
+    # accel=kvm: Utilise l'accélération matérielle KVM pour de meilleures performances
+    -machine q35,accel=kvm
+    
+    # CPU: Utilise le CPU de l'hôte (meilleures performances)
+    # host: Passe toutes les fonctionnalités CPU de l'hôte à la VM
+    -cpu host
+    
+    # Configuration SMP (Symmetric Multi-Processing)
+    # cores=2: 2 cœurs CPU
+    # threads=2: 2 threads par cœur (hyperthreading)
+    # sockets=1: 1 socket CPU
+    # Total: 4 vCPUs (2 cores × 2 threads)
+    -smp cores=2,threads=2,sockets=1
+    
+    # Mémoire: 8GB RAM allouée à la VM
+    # Suffisant pour l'installation et le fonctionnement de Harvester
+    -m 8192
+    
+    # Mode non-graphique: pas d'interface graphique, sortie sur console
+    # Utile pour les environnements sans X11 ou pour l'automatisation
+    -nographic
+    
+    # Console série principale: redirigée vers stdout/stderr
+    # Permet de voir les messages du kernel et du système
+    -serial mon:stdio
+    
+    # Console série secondaire: redirigée vers un fichier de log
+    # Capture les logs d'installation pour débogage
+    -serial file:harvester-installer.log
+    
+    # Pas de carte réseau: -nic none
+    # L'installation automatique n'a pas besoin de réseau
+    # (les images sont déjà dans l'ISO)
+    -nic none
+  )
+  
+  # ========================================================================
+  # Configuration du firmware UEFI (OVMF)
+  # ========================================================================
+  # Méthode 1 (recommandée): Utilisation de pflash avec fichiers séparés
+  # - pflash (parallel flash): Simule une mémoire flash parallèle utilisée
+  #   par les systèmes UEFI pour stocker le firmware
+  # - CODE (readonly): Contient le firmware UEFI principal (non modifiable)
+  # - VARS (read-write): Contient les variables NVRAM (modifiables)
+  # Cette méthode permet de persister les paramètres UEFI entre les boots
+  # ========================================================================
+  if [ -n "${OVMF_CODE}" ] && [ -n "${OVMF_VARS}" ]; then
+    echo "Using UEFI firmware: ${OVMF_CODE} and ${OVMF_VARS}"
+    QEMU_ARGS+=(
+      # Premier pflash: Firmware CODE en lecture seule
+      # if=pflash: Interface pflash (mémoire flash parallèle)
+      # format=raw: Format raw (non formaté)
+      # readonly=on: Lecture seule (protège le firmware)
+      # file=${OVMF_CODE}: Chemin vers le fichier CODE
+      -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}"
+      
+      # Deuxième pflash: Variables NVRAM en lecture/écriture
+      # readonly=off (par défaut): Permet la modification des variables UEFI
+      # file=${OVMF_VARS}: Chemin vers le fichier VARS (peut être une copie temporaire)
+      -drive "if=pflash,format=raw,file=${OVMF_VARS}"
+    )
+  
+  # Méthode 2 (fallback): Utilisation de -bios avec fichier combiné
+  # -bios: Charge le firmware depuis un fichier BIOS/UEFI combiné
+  # Moins flexible que pflash mais fonctionne si les fichiers séparés
+  # ne sont pas disponibles
+  elif [ -n "${OVMF_CODE}" ]; then
+    echo "Using UEFI firmware: ${OVMF_CODE}"
+    QEMU_ARGS+=(-bios "${OVMF_CODE}")
+  
+  # Méthode 3 (fallback): Boot BIOS legacy
+  # Si OVMF n'est pas trouvé, QEMU utilisera son BIOS legacy intégré
+  # L'image créée utilisera alors le boot BIOS au lieu d'UEFI
+  else
+    echo "Warning: OVMF firmware not found. Falling back to legacy BIOS boot."
+    echo "To enable UEFI, install OVMF package (e.g., 'apt-get install ovmf' or 'zypper install qemu-ovmf-x86_64')"
+  fi
+  
+  # ========================================================================
+  # Configuration des périphériques de stockage et de boot
+  # ========================================================================
+  QEMU_ARGS+=(
+    # Disque virtuel: Image raw créée précédemment
+    # if=virtio: Utilise l'interface virtio (meilleures performances que IDE)
+    # cache=writeback: Cache en écriture (meilleures performances)
+    # discard=ignore: Ignore les commandes TRIM (non nécessaire pour raw)
+    # format=raw: Format de disque raw (non formaté, accès direct)
+    -drive "file=${ARTIFACTS_DIR}/${PROJECT_PREFIX}-amd64.raw,if=virtio,cache=writeback,discard=ignore,format=raw"
+    
+    # CD-ROM: ISO Harvester pour l'installation
+    # Contient le système live et les images de conteneurs nécessaires
+    -cdrom "${ARTIFACTS_DIR}/${PROJECT_PREFIX}-amd64.iso"
+    
+    # Kernel Linux: Fichier vmlinuz extrait de l'ISO
+    # Utilisé pour démarrer le système live depuis l'ISO
+    -kernel "${ARTIFACTS_DIR}/${PROJECT_PREFIX}-vmlinuz-amd64"
+    
+    # Paramètres du kernel: Configuration pour le boot depuis ISO
+    # cdroot root=live:CDLABEL=COS_LIVE: Boot depuis le système live sur CD
+    # rd.live.dir=/: Répertoire racine du système live
+    # rd.live.ram=1: Charge le système en RAM
+    # rd.live.squashimg=rootfs.squashfs: Image squashfs du système
+    # console=ttyS1: Console série sur ttyS1 (pour les logs)
+    # rd.cos.disable: Désactive certaines fonctionnalités COS
+    # net.ifnames=1: Utilise les noms d'interface réseau prévisibles
+    # harvester.install.mode=install: Mode installation (pas live)
+    # harvester.install.device=/dev/vda: Disque cible pour l'installation
+    # harvester.install.automatic=true: Installation automatique (pas d'interaction)
+    # harvester.install.powerOff=true: Arrête la VM après installation
+    # harvester.os.password=rancher: Mot de passe par défaut
+    # harvester.scheme_version=1: Version du schéma de partitionnement
+    # harvester.install.persistentPartitionSize=150Gi: Taille de la partition persistante
+    # harvester.install.skipchecks=true: Ignore les vérifications pré-installation
+    -append "cdroot root=live:CDLABEL=COS_LIVE rd.live.dir=/ rd.live.ram=1 rd.live.squashimg=rootfs.squashfs console=ttyS1 rd.cos.disable net.ifnames=1 harvester.install.mode=install harvester.install.device=/dev/vda harvester.install.automatic=true harvester.install.powerOff=true harvester.os.password=rancher harvester.scheme_version=1 harvester.install.persistentPartitionSize=150Gi harvester.install.skipchecks=true"
+    
+    # Initrd: Ramdisk initial pour le boot
+    # Contient les modules et scripts nécessaires au démarrage
+    -initrd "${ARTIFACTS_DIR}/${PROJECT_PREFIX}-initrd-amd64"
+    
+    # Boot: Boot depuis CD une seule fois puis disque
+    # once=d: Boot depuis CD (d) une seule fois, puis utilise l'ordre par défaut
+    # Après l'installation, le système bootera depuis le disque
+    -boot once=d
+  )
+  
+  # Exécution de QEMU avec tous les paramètres configurés
+  # L'installation se fera automatiquement et la VM s'arrêtera à la fin
+  qemu-system-x86_64 "${QEMU_ARGS[@]}"
+  
+  # Affichage des 100 dernières lignes du log d'installation
+  # Utile pour vérifier que l'installation s'est bien déroulée
   tail -100 harvester-installer.log
+  
+  # Compression de l'image raw avec zstd
+  # -T4: Utilise 4 threads pour la compression (parallélisation)
+  # --rm: Supprime le fichier original après compression réussie
+  # Résultat: Fichier .zst beaucoup plus petit (typiquement 7-10% de la taille originale)
   echo "compressing raw image"
   zstd -T4 --rm ${ARTIFACTS_DIR}/${PROJECT_PREFIX}-amd64.raw
 fi
